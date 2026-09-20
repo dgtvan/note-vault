@@ -1,0 +1,70 @@
+# note-vault configuration
+#
+# The one default config. install.ps1 copies it to <vault>\config.yaml on first install,
+# filling in store, repos and scan.roots from its -Vault, -Repo and -ScanRoot arguments;
+# the app embeds it and writes the same file if it ever starts against a vault without
+# one. Neither ever replaces an existing config.yaml - the copy in the vault is yours.
+# The app reads it at startup, so restart note-vault after editing.
+#
+# Auto-start is install.ps1's job, not a setting here.
+
+store: 'C:\NoteVault'         # informational: the vault.path pointer decides the location
+
+notesDirName: .notes
+debounceMs: 3000              # long on purpose: AI tools stream output
+
+setup:
+  ensureGlobalGitignore: true
+
+# Explicitly listed repositories. These always win, so a hand-set alias is never
+# overridden by auto-discovery below.
+#
+# repos:
+#   - path: 'D:\Src\Personal\note-vault'
+#     alias: note-vault
+repos: []
+
+# Auto-discovery. Point this at the folders holding your repos and note-vault finds them
+# itself. Only the listed roots are scanned; nothing outside them is ever looked at.
+# It does NOT walk the tree: it lists directory names down to maxDepth and stops
+# descending the moment it sees a .git, so repo contents are never touched.
+scan:
+  roots: []                 # e.g. ['D:\Src', 'D:\Work', 'E:\Code']
+  maxDepth: 3               # covers org/repo, and the repo.worktrees/branch convention
+  watchForNewRepos: true    # event-driven; a new clone is picked up without polling
+  rescanMinutes: 30         # slow safety net only - the watchers do the real work
+  skipDirNames:             # matched against the folder NAME, never a full path
+    [node_modules, .vs, .vscode, bin, obj, dist, out, target, __pycache__,
+     packages, .next, venv, .venv]
+
+extraNotesDirs: []            # notes folders outside any repo
+
+discovery:
+  # Re-enumerates worktrees via git - one process per repo, so this is the costly one.
+  # New repos and new notes folders arrive through watchers instead, so this interval
+  # only bounds how long a brand-new *worktree* can go unnoticed.
+  pollSeconds: 3600
+
+  # Cheap upkeep: one Directory.Exists per known root, to notice a notes folder
+  # appearing or disappearing. A backstop only - the folder watchers catch that in
+  # about a second. File changes are NEVER detected here; that is the watcher's job.
+  tickSeconds: 900
+
+reconcile:
+  onStartup: true
+  onResume: true
+  onWatcherError: true
+
+capture:
+  appendOnly: true            # structural, not switchable; recorded here as documentation
+  skipTempFiles:              # matched against FILENAME only - the only filter there is
+    ["~$*", "*.tmp", "*.partial", "*.crdownload", "*.swp", "*.swo", "*~",
+     ".#*", "Thumbs.db", "desktop.ini", ".DS_Store"]
+  logLargeCaptureBytes: 26214400   # log-only; never skips
+
+tray:
+  statusRefreshSeconds: 3
+  notifyOnError: false        # the red icon is the signal; balloons are opt-in
+
+maintenance:
+  gcWeekly: true

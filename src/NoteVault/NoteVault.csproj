@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>note-vault</AssemblyName>
+    <RootNamespace>NoteVault</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Off on purpose. Compressed bundles are decompressed into private memory at
+         startup; uncompressed ones are memory-mapped from the exe, so the pages are
+         file-backed and cheap for Windows to drop. Trades disk for resident RAM. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+
+    <!-- A mostly idle tray app gains nothing from background GC and pays for its
+         extra thread and reservations. -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <DebugType>embedded</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+
+  <!-- The one default config: install.ps1 seeds from the file itself, the app from this copy. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\scripts\config.default.yaml" LogicalName="config.default.yaml" />
+  </ItemGroup>
+
+</Project>

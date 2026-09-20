@@ -1,0 +1,6 @@
+# build output
+bin/
+obj/
+artifacts/
+
+# .notes/ is already covered by the global gitignore
