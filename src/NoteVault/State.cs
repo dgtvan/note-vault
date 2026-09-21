@@ -27,6 +27,7 @@ public sealed class NoteRoot
     public RootState State { get; set; } = RootState.NoNotes;
     public DateTime? LastCapture { get; set; }
     public int FileCount { get; set; }
+    public long SizeBytes { get; set; }
     public DateTime FirstSeenUtc { get; set; } = DateTime.UtcNow;
 
     /// <summary>Stable identity for a root: one worktree in one repo (plus which notes folder, if more than one is configured).</summary>

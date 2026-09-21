@@ -614,15 +614,15 @@ that answers *"is this actually working?"* Closing it does not quit the app.
  │ Queue    0 pending       discovery 41 s ago    reconcile 06:12 today   │
  │                                            [Force refresh]  [Pause]   │
  ├────────────────────────────────────────────────────────────────────────┤
- │ repo / worktree / file             files   last capture       state    │
- │ work / example-service                 1   2026-09-10 14:32   watching │
- │ work / TICKET-1042-example-bug-fix…    7   2026-09-10 09:15   watching │
- │ work / TICKET-2077-example-feature…    3   2 min ago          watching │
- │ tools / work-tools                     0   —                  no .notes│
- │ gyb / got-your-back                   12   yesterday 18:22    watching │
- │ work / TICKET-1900-old-branch          18   2026-08-14 11:03   retired  │
- │ ciam-app / InDevelop…/src/api/.env     1   6 min ago          tracked  │
- │ src/some/other.env (not found)         —   —                  not found│
+ │ repo / worktree / file             files    size   last capture       state    │
+ │ work / example-service                 1    8 KB   2026-09-10 14:32   watching │
+ │ work / TICKET-1042-example-bug-fix…    7   41 KB   2026-09-10 09:15   watching │
+ │ work / TICKET-2077-example-feature…    3   12 KB   2 min ago          watching │
+ │ tools / work-tools                     0    —      —                  no .notes│
+ │ gyb / got-your-back                   12  116 KB   yesterday 18:22    watching │
+ │ work / TICKET-1900-old-branch          18  204 KB   2026-08-14 11:03   retired  │
+ │ ciam-app / InDevelop…/src/api/.env     1  1.2 KB   6 min ago          tracked  │
+ │ src/some/other.env (not found)         —    —      —                  not found│
  ├─ errors ───────────────────────────────────────────────────────────────┤
  │ ✖ tools: git worktree list failed — not a git repository               │
  │ ✖ work/TICKET-2077: chat/transcript.md locked, 3 retries — will retry  │
@@ -640,8 +640,12 @@ reveals a stuck writer thread.
 **One combined table** — notes-folder roots and individually tracked files (5.8) together, not two
 separate lists, so one place answers "what is note-vault tracking" completely. A tracked file's
 row appends its relative path onto its worktree in the first column; its `files` column is always
-`1`. A declared pattern with no current match still gets a row (rather than vanishing silently),
-so a typo or a not-yet-created file is visible instead of silent. States:
+`1`, and its `size` column is the live source file's current size. A declared pattern with no
+current match still gets a row (rather than vanishing silently), so a typo or a not-yet-created
+file is visible instead of silent. Every column header is clickable to sort the whole table by it
+(ascending, click again for descending) — the sort choice sticks across the auto-refresh until a
+different header is clicked; with no column chosen it falls back to the default grouping shown
+above. States:
 
 | State | Meaning |
 |---|---|

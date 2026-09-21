@@ -452,7 +452,11 @@ public sealed class Engine : IDisposable
         }
 
         foreach (var root in roots)
-            root.FileCount = CountVaultFiles(root.VaultAbsPath);
+        {
+            var (count, bytes) = CountVaultFilesAndSize(root.VaultAbsPath);
+            root.FileCount = count;
+            root.SizeBytes = bytes;
+        }
 
         // roots.json remembers per-root capture times, so "last capture" survives a
         // restart instead of reading as "never" next to a vault full of commits.
@@ -551,17 +555,26 @@ public sealed class Engine : IDisposable
         }
     }
 
-    private static int CountVaultFiles(string dir)
+    private static (int Count, long Bytes) CountVaultFilesAndSize(string dir)
     {
         try
         {
-            if (!Directory.Exists(dir)) return 0;
-            return Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
-                .Count(f => !VaultPaths.LegacyRootMarkerNames.Contains(Path.GetFileName(f), StringComparer.OrdinalIgnoreCase));
+            if (!Directory.Exists(dir)) return (0, 0);
+
+            var count = 0;
+            long bytes = 0;
+            foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                if (VaultPaths.LegacyRootMarkerNames.Contains(Path.GetFileName(f), StringComparer.OrdinalIgnoreCase))
+                    continue;
+                count++;
+                try { bytes += new FileInfo(f).Length; } catch { }
+            }
+            return (count, bytes);
         }
         catch
         {
-            return 0;
+            return (0, 0);
         }
     }
 

@@ -61,6 +61,15 @@ public sealed class StatusForm : Form
     private readonly ListView _errors = new();
     private readonly Label _errorsHeader = new();
 
+    private static readonly string[] ColumnTitles =
+        { "repo / worktree / file", "files", "size", "last capture", "state" };
+
+    // null = default grouping (state, then alias/worktree, tracked rows last). Set once
+    // a column header is clicked, and stays in effect across every auto-refresh until
+    // another header is clicked.
+    private int? _sortColumn;
+    private bool _sortAscending = true;
+
     private static readonly string[] RowOne =
         { "VAULT", "COMMITS", "SIZE", "QUEUE" };
 
@@ -232,12 +241,15 @@ public sealed class StatusForm : Form
     private Control BuildRootsPanel()
     {
         ConfigureList(_roots);
-        _roots.Columns.Add("repo / worktree / file", 430);
-        _roots.Columns.Add("files", 70, HorizontalAlignment.Right);
-        _roots.Columns.Add("last capture", 190);
-        _roots.Columns.Add("state", 130);
+        _roots.Columns.Add(ColumnTitles[0], 370);
+        _roots.Columns.Add(ColumnTitles[1], 60, HorizontalAlignment.Right);
+        _roots.Columns.Add(ColumnTitles[2], 90, HorizontalAlignment.Right);
+        _roots.Columns.Add(ColumnTitles[3], 170);
+        _roots.Columns.Add(ColumnTitles[4], 110);
+        _roots.HeaderStyle = ColumnHeaderStyle.Clickable;   // the only sortable list here
         _roots.Dock = DockStyle.Fill;
         _roots.DoubleClick += OpenSelectedRootFolder;
+        _roots.ColumnClick += OnRootsColumnClick;
 
         var panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
         panel.Controls.Add(_roots);
@@ -337,72 +349,81 @@ public sealed class StatusForm : Form
             .ThenBy(r => r.WorktreeName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var tracked = BuildTrackedRows();
+        var rows = BuildRows(ordered);
+        if (_sortColumn is not null) rows = Sorted(rows);
 
-        var keys = ordered.Select(r => r.Key).Concat(tracked.Select(t => t.Key)).ToList();
+        var keys = rows.Select(r => r.Key).ToList();
         if (SameKeys(_roots, keys))
         {
-            var i = 0;
-            foreach (var r in ordered) ApplyRoot(_roots.Items[i++], r);
-            foreach (var t in tracked) ApplyTrackedRow(_roots.Items[i++], t);
+            for (var i = 0; i < rows.Count; i++) ApplyRow(_roots.Items[i], rows[i]);
             return;
         }
 
         RebuildPreservingView(_roots, () =>
         {
-            foreach (var r in ordered)
+            foreach (var row in rows)
             {
-                var item = new ListViewItem(new[] { r.Key, "", "", "" }) { Name = r.Key, Tag = r };
-                ApplyRoot(item, r);
-                _roots.Items.Add(item);
-            }
-
-            foreach (var t in tracked)
-            {
-                var item = new ListViewItem(new[] { "", "", "", "" }) { Name = t.Key };
-                ApplyTrackedRow(item, t);
+                var item = new ListViewItem(new[] { "", "", "", "", "" }) { Name = row.Key };
+                ApplyRow(item, row);
                 _roots.Items.Add(item);
             }
         });
     }
 
-    private void ApplyRoot(ListViewItem item, NoteRoot r)
+    private sealed class Row
     {
-        item.Tag = r;
-
-        var paused = _state.Paused && r.State == RootState.Watching;
-
-        var state = r.State switch
-        {
-            RootState.Watching => paused ? "paused" : "watching",
-            RootState.NoNotes => "no " + r.NotesDirName,
-            RootState.Retired => "retired",
-            _ => "error",
-        };
-
-        SetSub(item, 0, r.Key);
-        SetSub(item, 1, r.FileCount.ToString());
-        SetSub(item, 2, r.LastCapture is null ? "—" : VaultPaths.Ago(r.LastCapture));
-        SetSub(item, 3, state);
-
-        var colour = r.State switch
-        {
-            RootState.Retired => Dim,
-            RootState.NoNotes => Dim,
-            RootState.Error => Red,
-            _ => paused ? Dim : Ink,
-        };
-        if (item.ForeColor != colour) item.ForeColor = colour;
+        public required string Key;
+        public required string Label;
+        public int? Files;
+        public long? Bytes;
+        public DateTime? LastCapture;
+        public required string StateText;
+        public NoteRoot? Root;
+        public Color Colour;
     }
 
     /// <summary>
-    /// One row per (pattern, matched worktree) — a single declared pattern legitimately
-    /// matches several worktrees at once. A pattern with no current match still gets one
-    /// row, so "I added it but nothing shows up" is visible rather than silent.
+    /// One combined list: notes-folder roots, then one row per (tracked pattern, matched
+    /// worktree) — a single declared pattern legitimately matches several worktrees at
+    /// once. A pattern with no current match still gets a row, so "I added it but nothing
+    /// shows up" is visible rather than silent.
     /// </summary>
-    private List<(string Key, string Label, string Files, string LastCaptureText, string StateText, NoteRoot? Root)> BuildTrackedRows()
+    private List<Row> BuildRows(IReadOnlyList<NoteRoot> orderedRoots)
     {
-        var rows = new List<(string, string, string, string, string, NoteRoot?)>();
+        var rows = new List<Row>();
+
+        foreach (var r in orderedRoots)
+        {
+            var paused = _state.Paused && r.State == RootState.Watching;
+
+            var state = r.State switch
+            {
+                RootState.Watching => paused ? "paused" : "watching",
+                RootState.NoNotes => "no " + r.NotesDirName,
+                RootState.Retired => "retired",
+                _ => "error",
+            };
+
+            var colour = r.State switch
+            {
+                RootState.Retired => Dim,
+                RootState.NoNotes => Dim,
+                RootState.Error => Red,
+                _ => paused ? Dim : Ink,
+            };
+
+            rows.Add(new Row
+            {
+                Key = r.Key,
+                Label = r.Key,
+                Files = r.FileCount,
+                Bytes = r.SizeBytes,
+                LastCapture = r.LastCapture,
+                StateText = state,
+                Root = r,
+                Colour = colour,
+            });
+        }
 
         foreach (var pattern in _state.TrackedFilePatterns.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
         {
@@ -413,32 +434,81 @@ public sealed class StatusForm : Form
 
             if (found.Count == 0)
             {
-                rows.Add(("tracked|" + pattern, pattern + "  (not found in any known worktree)",
-                    "—", "—", "not found", null));
+                rows.Add(new Row
+                {
+                    Key = "tracked|" + pattern,
+                    Label = pattern + "  (not found in any known worktree)",
+                    StateText = "not found",
+                    Colour = Dim,
+                });
                 continue;
             }
 
             foreach (var m in found)
             {
-                rows.Add(("tracked|" + m.Root.Key + "|" + pattern, m.Root.Key + "/" + pattern.Replace('\\', '/'),
-                    "1", m.Root.LastCapture is null ? "—" : VaultPaths.Ago(m.Root.LastCapture), "tracked", m.Root));
+                long? size = null;
+                try { size = new FileInfo(m.AbsPath).Length; } catch { /* vanished between resolve and render */ }
+
+                rows.Add(new Row
+                {
+                    Key = "tracked|" + m.Root.Key + "|" + pattern,
+                    Label = m.Root.Key + "/" + pattern.Replace('\\', '/'),
+                    Files = 1,
+                    Bytes = size,
+                    LastCapture = m.Root.LastCapture,
+                    StateText = "tracked",
+                    Root = m.Root,
+                    Colour = Ink,
+                });
             }
         }
 
         return rows;
     }
 
-    private void ApplyTrackedRow(ListViewItem item,
-        (string Key, string Label, string Files, string LastCaptureText, string StateText, NoteRoot? Root) row)
+    private List<Row> Sorted(List<Row> rows)
+    {
+        IOrderedEnumerable<Row> ordered = _sortColumn switch
+        {
+            1 => _sortAscending ? rows.OrderBy(r => r.Files ?? -1) : rows.OrderByDescending(r => r.Files ?? -1),
+            2 => _sortAscending ? rows.OrderBy(r => r.Bytes ?? -1) : rows.OrderByDescending(r => r.Bytes ?? -1),
+            3 => _sortAscending
+                ? rows.OrderBy(r => r.LastCapture ?? DateTime.MinValue)
+                : rows.OrderByDescending(r => r.LastCapture ?? DateTime.MinValue),
+            4 => _sortAscending
+                ? rows.OrderBy(r => r.StateText, StringComparer.OrdinalIgnoreCase)
+                : rows.OrderByDescending(r => r.StateText, StringComparer.OrdinalIgnoreCase),
+            _ => _sortAscending
+                ? rows.OrderBy(r => r.Label, StringComparer.OrdinalIgnoreCase)
+                : rows.OrderByDescending(r => r.Label, StringComparer.OrdinalIgnoreCase),
+        };
+        return ordered.ToList();
+    }
+
+    private void OnRootsColumnClick(object? sender, ColumnClickEventArgs e)
+    {
+        if (_sortColumn == e.Column) _sortAscending = !_sortAscending;
+        else { _sortColumn = e.Column; _sortAscending = true; }
+
+        for (var i = 0; i < _roots.Columns.Count; i++)
+        {
+            var text = ColumnTitles[i] + (i == _sortColumn ? (_sortAscending ? " ▲" : " ▼") : "");
+            if (_roots.Columns[i].Text != text) _roots.Columns[i].Text = text;
+        }
+
+        Refresh_();
+    }
+
+    private void ApplyRow(ListViewItem item, Row row)
     {
         item.Tag = row.Root;
         SetSub(item, 0, row.Label);
-        SetSub(item, 1, row.Files);
-        SetSub(item, 2, row.LastCaptureText);
-        SetSub(item, 3, row.StateText);
+        SetSub(item, 1, row.Files?.ToString() ?? "—");
+        SetSub(item, 2, row.Bytes is null ? "—" : VaultPaths.HumanBytes(row.Bytes.Value));
+        SetSub(item, 3, row.LastCapture is null ? "—" : VaultPaths.Ago(row.LastCapture));
+        SetSub(item, 4, row.StateText);
 
-        var colour = row.Root is null ? Dim : Ink;
-        if (item.ForeColor != colour) item.ForeColor = colour;
+        if (item.ForeColor != row.Colour) item.ForeColor = row.Colour;
     }
 
     private void SyncErrors(IReadOnlyList<ErrorEntry> errors)
