@@ -93,7 +93,18 @@ public sealed class MaintenanceConfig
 public sealed class Config
 {
     public string Store { get; set; } = @"C:\NoteVault";
+
+    /// <summary>Deprecated single-name form; still read for an existing config.yaml. Prefer <see cref="NotesDirNames"/>.</summary>
     public string NotesDirName { get; set; } = ".notes";
+
+    /// <summary>
+    /// Every one of these is auto-discovered and watched in every worktree, independently.
+    /// Safe to list more than one now that a captured file's vault path preserves its real
+    /// worktree-relative path (including this folder name) instead of flattening it away —
+    /// two differently named notes folders can no longer collide on the same vault path.
+    /// </summary>
+    public List<string> NotesDirNames { get; set; } = new();
+
     public int DebounceMs { get; set; } = 3000;
 
     public SetupConfig Setup { get; set; } = new();
@@ -112,6 +123,10 @@ public sealed class Config
     public string RootsJson => System.IO.Path.Combine(Store, "roots.json");
     public string ReposJson => System.IO.Path.Combine(Store, "repos.json");
     public string ConfigPath => System.IO.Path.Combine(Store, "config.yaml");
+    public string TrackedFilesJson => System.IO.Path.Combine(Store, "tracked-files.json");
+
+    /// <summary>The names actually used at runtime — <see cref="NotesDirNames"/> if set, else the single legacy <see cref="NotesDirName"/>, deduplicated. Always at least one entry.</summary>
+    public List<string> EffectiveNotesDirNames { get; private set; } = new() { ".notes" };
 
     /// <summary>
     /// Resolves where the vault lives before the config itself can be read.
@@ -167,6 +182,16 @@ public sealed class Config
         if (cfg.Scan.MaxDepth < 1) cfg.Scan.MaxDepth = 1;
         if (cfg.Scan.MaxDepth > 8) cfg.Scan.MaxDepth = 8;   // a runaway depth is how this turns into a tree walk
         if (string.IsNullOrWhiteSpace(cfg.NotesDirName)) cfg.NotesDirName = ".notes";
+
+        var names = cfg.NotesDirNames
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .ToList();
+        if (names.Count == 0 && !string.IsNullOrWhiteSpace(cfg.NotesDirName))
+            names.Add(cfg.NotesDirName.Trim());
+        if (names.Count == 0)
+            names.Add(".notes");
+        cfg.EffectiveNotesDirNames = names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
         foreach (var repo in cfg.Repos)
         {

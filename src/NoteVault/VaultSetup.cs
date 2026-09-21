@@ -120,26 +120,33 @@ public static class VaultSetup
             if (excludes.StartsWith("~"))
                 excludes = Path.Combine(home, excludes.TrimStart('~').TrimStart('/', '\\'));
 
-            var entry = cfg.NotesDirName.TrimEnd('/', '\\') + "/";
-
             Directory.CreateDirectory(Path.GetDirectoryName(excludes)!);
             var lines = File.Exists(excludes)
                 ? File.ReadAllLines(excludes).ToList()
                 : new List<string>();
 
-            var already = lines.Any(l =>
-            {
-                var t = l.Trim();
-                return t == entry || t == cfg.NotesDirName;
-            });
+            var added = new List<string>();
 
-            if (!already)
+            foreach (var name in cfg.EffectiveNotesDirNames)
             {
+                var entry = name.TrimEnd('/', '\\') + "/";
+                var already = lines.Any(l =>
+                {
+                    var t = l.Trim();
+                    return t == entry || t == name;
+                });
+                if (already) continue;
+
                 if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[^1]))
                     lines.Add("");
                 lines.Add(entry);
+                added.Add(entry);
+            }
+
+            if (added.Count > 0)
+            {
                 File.WriteAllLines(excludes, lines, new UTF8Encoding(false));
-                Log.Info($"Appended '{entry}' to {excludes}");
+                Log.Info($"Appended {string.Join(", ", added)} to {excludes}");
             }
 
             errors.Clear(ErrKind.GlobalGitignore, "global");
@@ -152,7 +159,7 @@ public static class VaultSetup
 
     private static string ReadmeText(Config cfg)
     {
-        var notes = cfg.NotesDirName;
+        var notes = string.Join("`, `", cfg.EffectiveNotesDirNames);
         return $"""
 # note-vault
 
@@ -176,6 +183,14 @@ git's point of view nothing was ever deleted.
 A folder literally named `.git` inside a notes folder is stored here as `{VaultPaths.MangledGit}`.
 Without that rename git would record a submodule pointer and silently drop the folder's entire
 contents. **Rename it back when restoring by hand.**
+
+## `vault/` holds nothing but real captured content
+
+Every worktree's identity — source path, repo, alias, first seen — lives in `roots.json` at this
+repository's root, not inside `vault/` itself. A worktree with nothing captured yet simply has no
+folder here at all; one appears only once real content lands. If you see a `.note-vault-root` or
+`.note-vault-root.json` file in an older worktree folder, that is a leftover from a previous
+version of note-vault that wrote one per folder — harmless, frozen, and never written again.
 
 ## Do not change these settings
 
@@ -202,8 +217,12 @@ tree is append-only, so a credential captured here stays recoverable after you r
 
 ## Layout
 
-    vault/<repo-alias>/<worktree-name>/...   mirrored notes
+    vault/<repo-alias>/<worktree-name>/...   mirrors the worktree's real layout —
+                                              <notesDirName>/... plus any individually
+                                              tracked file at its actual path (Tracked
+                                              files… in the tray menu)
     roots.json                               alias -> source path, active/retired
+    tracked-files.json                       relative paths tracked outside any notes folder
     config.yaml                              note-vault settings
     logs/                                    not tracked
 

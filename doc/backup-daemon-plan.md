@@ -140,15 +140,14 @@ C:\NoteVault\
   .gitattributes                     * -text   (byte-exact round-trip)
   README.md                          written on first run — see below
   config.yaml
-  roots.json                         alias -> source path, active/retired
+  roots.json                         alias -> source path, active/retired, first seen
   vault\
     work\
       example-service\               <- the primary worktree
-        .note-vault-root             marker: source path, alias, first seen
-        env-dev\.env
+        .notes\env-dev\.env
       InDevelop-TICKET-1042-example-bug-fix\
-        .note-vault-root
-        ...
+        .notes\...
+        src\api\.env                 <- individually tracked (5.8), same coordinate system
     gyb\
       got-your-back\
   logs\note-vault-20260910.log       NOT tracked by the vault repo
@@ -160,8 +159,14 @@ by construction, since worktrees are directories. `roots.json` records the full 
 collision is detectable rather than silent, and so the vault is self-describing if you ever open
 it without the app.
 
-`.note-vault-root` also solves git's inability to track an empty directory: a worktree whose
-`.notes` is empty still gets a committed presence in the vault.
+**`vault/` holds nothing but real captured content — no per-folder marker file.** A worktree's
+identity (source path, repo, alias, first seen) lives in `roots.json` at the vault root instead.
+The consequence, accepted rather than worked around: git cannot track an empty directory, so a
+worktree with nothing captured yet simply has **no folder under `vault/` at all** until real
+content lands — there is no synthetic placeholder to give it an early, empty presence. An earlier
+revision wrote a `.note-vault-root(.json)` file into each worktree folder specifically to force
+that empty-directory presence; removed once it became clear that duplicated `roots.json` and put
+non-worktree content inside `vault/`, which is exactly what `vault/` should never contain.
 
 Because the vault is append-only, **its working tree is the union of every file ever seen** —
 not a mirror of what currently exists on disk. Browsing `C:\NoteVault\vault\...` in Explorer shows
@@ -201,17 +206,18 @@ Section 5.4 depends on (`core.autocrlf=false`, `core.safecrlf=false`, `core.file
 write and commit `README.md` (Section 4.1). The README matters more than it looks: it is the only
 thing that explains the vault's conventions to a future reader, because there is no UI that does.
 
-**Global gitignore.** Ensure the configured notes folder is globally ignored:
+**Global gitignore.** Ensure every configured notes folder name is globally ignored:
 
 1. `git config --global --get core.excludesFile`.
 2. If unset, set it to `~/.gitignore_global`. **Never overwrite an existing value** — if the user
    already points it somewhere, that file is the one to edit.
 3. Create the file if missing.
-4. If no line already equals `<notesDirName>/`, append it.
+4. For each name in `notesDirNames` (or the single `notesDirName`, Section 9), if no line already
+   equals `<name>/`, append it.
 5. Log exactly what changed, and show a tray notification the first time it modifies anything.
 
 This is the one thing note-vault writes outside its own directory, so it is deliberately narrow:
-one appended line, no rewriting, no reordering, no removal. Controlled by
+one appended line per name, no rewriting, no reordering, no removal. Controlled by
 `setup.ensureGlobalGitignore` (default `true`) for anyone who wants to manage it by hand.
 
 On this machine it is already a no-op — `~/.gitignore_global` already contains `.notes/`.
@@ -278,7 +284,7 @@ exactly one writer, and contention here is a corruption-shaped bug):
 
 ```
 for each path in batch:                       # deletions never reach here
-    src = <worktree>\.notes\<rel>
+    src = <worktree>\<rel>                    # rel includes the notesDirName segment for a notes file
     dst = C:\NoteVault\vault\<alias>\<wt>\<mangled rel>
     copy src -> dst (creating dirs)
 
@@ -374,6 +380,42 @@ This is the piece the no-walk constraint made impossible and which now costs not
 complete coverage of app downtime and closes the first-touch gap entirely — a file's first
 captured revision is its *actual* content at discovery, not its content after the first edit that
 happened to be observed.
+
+### 5.8 Tracked files — individually, outside `.notes`
+
+A second, smaller capture path for one-off files that matter but do not live in `.notes` — the
+motivating case is a `.env` at a fixed repo-relative path (e.g. `src/api/.env`) that recurs under
+every worktree of a `repo.worktrees\branch` layout. Rather than pin one absolute path, the user
+declares a **relative path** (e.g. `src/api/.env`) and it is checked against **every** live,
+non-retired worktree — one entry follows the file across every worktree (or repo) that happens to
+have it.
+
+Patterns are user-managed from the tray ("Tracked files…"), not `config.yaml` — that file is
+never rewritten by the app after first run. They persist to `<vault>\tracked-files.json`, which is
+itself versioned in the vault repo alongside `roots.json`.
+
+Mechanically this rides the same debounce/commit pipeline as `.notes` (Sections 5.2–5.4), and lands
+in the vault at its **real, unmodified relative path from the worktree root** — the same
+coordinate system a mirrored notes file now uses (5.4 mirrors `<worktree>\<rel>`, not
+`<worktree>\.notes\<rel>` stripped of its prefix). Because both are relative to the same root,
+there is nothing to reconcile between them and no separate namespace is needed: the vault simply
+mirrors the worktree's actual layout, `.notes` folder included, so a tracked file sits exactly
+where it does on disk.
+
+The one real difference from `.notes` is watcher scope: one non-recursive watcher per (worktree,
+containing folder), filtered to the exact declared filename(s) in the callback —
+`FileSystemWatcher.Filter` only accepts one glob, and everything else in that folder is
+deliberately ignored.
+
+**First-appearance is a known, accepted gap.** `FileSystemWatcher` requires the target directory to
+exist, so a watcher is only attached once a tracked file has already been seen once. A file that
+does not exist yet anywhere is only picked up on the next resolve pass — bounded by the cheap tick
+(`discovery.tickSeconds`, default 900 s / 15 min), the hourly full discovery, or immediately after
+editing the list from the tray (which forces a rescan). Once seen once, further edits are watched
+live, same as `.notes`. Treated the same as the other schedule figures in the Status window
+(Section 8.1): an upper bound, not a promise — closing it with a dedicated appearance-watcher
+(mirroring 5.1's parent-folder watch for a `.notes` that does not exist yet) is possible later if
+15 minutes proves too slow in practice.
 
 ---
 
@@ -518,6 +560,7 @@ building a window on top of that would only re-implement `git log` and `git show
   note-vault
   ─────────────────────
   Status…
+  Tracked files…          Add/remove relative paths tracked outside .notes (5.8)
   Open vault folder        Explorer at C:\NoteVault\vault
   ─────────────────────
   Quit
@@ -569,14 +612,17 @@ that answers *"is this actually working?"* Closing it does not quit the app.
  ┌ note-vault ────────────────────────────────────────────────── ▲ error ─┐
  │ Vault    C:\NoteVault    1,284 commits   18.4 MB   last gc 3 days ago  │
  │ Queue    0 pending       discovery 41 s ago    reconcile 06:12 today   │
+ │                                            [Force refresh]  [Pause]   │
  ├────────────────────────────────────────────────────────────────────────┤
- │ repo / worktree                    files   last capture       state    │
+ │ repo / worktree / file             files   last capture       state    │
  │ work / example-service                 1   2026-09-10 14:32   watching │
  │ work / TICKET-1042-example-bug-fix…    7   2026-09-10 09:15   watching │
  │ work / TICKET-2077-example-feature…    3   2 min ago          watching │
  │ tools / work-tools                     0   —                  no .notes│
  │ gyb / got-your-back                   12   yesterday 18:22    watching │
  │ work / TICKET-1900-old-branch          18   2026-08-14 11:03   retired  │
+ │ ciam-app / InDevelop…/src/api/.env     1   6 min ago          tracked  │
+ │ src/some/other.env (not found)         —   —                  not found│
  ├─ errors ───────────────────────────────────────────────────────────────┤
  │ ✖ tools: git worktree list failed — not a git repository               │
  │ ✖ work/TICKET-2077: chat/transcript.md locked, 3 retries — will retry  │
@@ -586,10 +632,16 @@ that answers *"is this actually working?"* Closing it does not quit the app.
 Three bands:
 
 **Vault summary.** Store path, commit count, on-disk size, last `git gc`, pending queue depth,
-and when discovery and reconcile last ran. Queue depth is the one number that reveals a stuck
-writer thread.
+when discovery and reconcile last ran, and two buttons: **Pause** (5.2) and **Force refresh** — a
+manual override that re-runs discovery, reconciles every root, and re-resolves every tracked-file
+pattern immediately, rather than waiting for the schedule. Queue depth is the one number that
+reveals a stuck writer thread.
 
-**Per-root table.** One row per worktree, with its state:
+**One combined table** — notes-folder roots and individually tracked files (5.8) together, not two
+separate lists, so one place answers "what is note-vault tracking" completely. A tracked file's
+row appends its relative path onto its worktree in the first column; its `files` column is always
+`1`. A declared pattern with no current match still gets a row (rather than vanishing silently),
+so a typo or a not-yet-created file is visible instead of silent. States:
 
 | State | Meaning |
 |---|---|
@@ -597,11 +649,13 @@ writer thread.
 | `no .notes` | Worktree known, folder not created yet — informational, not a problem |
 | `retired` | Worktree gone; notes preserved in the vault (5.6) |
 | `error` | Watcher failed to attach, or captures are failing — details in warnings |
+| `tracked` / `not found` | An individually tracked file (5.8): currently matched, or not |
 
 **Errors, per repo/project** — exactly the five conditions from Section 8, and nothing else. Each
 carries the root it belongs to, so *which project is broken* is answerable at a glance. They are
 sticky until the underlying condition clears on a later successful operation, so a transient
 failure at 03:00 is still visible at 09:00.
+
 
 When there is nothing wrong, this band is empty and the icon is normal. An empty band is the
 expected steady state, not a sign the window failed to load.
@@ -619,10 +673,11 @@ Explorer. That is a shortcut to the filesystem, not a browse UI.
 store: C:\NoteVault            # a local git repo
 
 notesDirName: .notes
+# notesDirNames: [.notes, .ai-notes]  # optional; several, independently watched (see below)
 debounceMs: 3000              # long on purpose: AI tools stream output
 
 setup:
-  ensureGlobalGitignore: true # append "<notesDirName>/" to the global gitignore (5.0)
+  ensureGlobalGitignore: true # append "<name>/" to the global gitignore for each configured name (5.0)
 
 repos:
   - path: D:\Work\example-service
@@ -656,6 +711,18 @@ tray:                         # auto-start is install.ps1's job (7.1), not a set
 maintenance:
   gcWeekly: true
 ```
+
+`trackedFiles` (Section 5.8) is deliberately not a `config.yaml` key — it is user-managed from the
+tray and persisted to `<vault>\tracked-files.json`, so the app can rewrite it without touching the
+file the user hand-edits.
+
+`notesDirNames` (plural) is the array form of `notesDirName`, added once the vault-layout revision
+(5.4/5.8) made it safe: each configured name is auto-discovered and watched **independently** in
+every worktree — e.g. both `.notes` and `.ai-notes` at once — and, because a captured file now
+keeps its real worktree-relative path (folder name included) rather than being flattened, two
+differently-named notes folders can never collide on the same vault path. When `notesDirNames` is
+non-empty it wins outright; the singular `notesDirName` stays only for an existing config.yaml
+that has never been touched to add the plural key.
 
 Sources are on `D:`, so `C:\NoteVault` survives a `D:` failure. The vault holds text at kilobyte
 scale, so sizing is a non-issue for years.

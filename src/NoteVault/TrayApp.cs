@@ -22,6 +22,7 @@ public sealed class TrayApp : ApplicationContext
     private readonly Control _marshal;
 
     private StatusForm? _status;
+    private TrackedFilesForm? _trackedFilesForm;
     private bool _wasError;
     private bool _shuttingDown;
 
@@ -36,6 +37,7 @@ public sealed class TrayApp : ApplicationContext
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Status…", null, (_, _) => ShowStatus());
+        menu.Items.Add("Tracked files…", null, (_, _) => ShowTrackedFiles());
         menu.Items.Add("Open vault folder", null, (_, _) => OpenVault());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit", null, (_, _) => QuitApp());
@@ -136,6 +138,19 @@ public sealed class TrayApp : ApplicationContext
         _status.Activate();
     }
 
+    private void ShowTrackedFiles()
+    {
+        if (_trackedFilesForm is null || _trackedFilesForm.IsDisposed)
+            _trackedFilesForm = new TrackedFilesForm(_state, _engine);
+
+        _trackedFilesForm.Show();
+        if (_trackedFilesForm.WindowState == FormWindowState.Minimized)
+            _trackedFilesForm.WindowState = FormWindowState.Normal;
+
+        _trackedFilesForm.BringToFront();
+        _trackedFilesForm.Activate();
+    }
+
     private void OpenVault()
     {
         var target = Directory.Exists(_cfg.VaultTree) ? _cfg.VaultTree : _cfg.VaultDir;
@@ -170,6 +185,7 @@ public sealed class TrayApp : ApplicationContext
         catch { }
 
         try { _status?.Dispose(); } catch { }
+        try { _trackedFilesForm?.Dispose(); } catch { }
         try { _marshal.Dispose(); } catch { }
 
         ExitThread();

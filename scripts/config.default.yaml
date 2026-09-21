@@ -11,6 +11,11 @@
 store: 'C:\NoteVault'         # informational: the vault.path pointer decides the location
 
 notesDirName: .notes
+# notesDirNames: [.notes, .ai-notes]   # optional: watch several, independently, per worktree.
+                                        # Takes over from notesDirName above when non-empty.
+                                        # Each captured file keeps its real relative path in the
+                                        # vault (folder name included), so several names can
+                                        # never collide with each other.
 debounceMs: 3000              # long on purpose: AI tools stream output
 
 setup:

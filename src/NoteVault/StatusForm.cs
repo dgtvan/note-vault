@@ -26,6 +26,7 @@ public sealed class StatusForm : Form
 
     private readonly Label _headline = new();
     private readonly Button _pause = new();
+    private readonly Button _forceRefresh = new();
     private readonly TableLayoutPanel _stats = new();
     private readonly Dictionary<string, Label> _values = new(StringComparer.Ordinal);
     private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 350, ReshowDelay = 100 };
@@ -74,12 +75,12 @@ public sealed class StatusForm : Form
 
         Text = "note-vault";
         Width = 980;
-        Height = 680;
+        Height = 700;
         StartPosition = FormStartPosition.CenterScreen;
         Icon = TrayIcons.Normal;
         Font = new Font("Segoe UI", 9F);
         BackColor = Color.White;
-        MinimumSize = new Size(760, 480);
+        MinimumSize = new Size(760, 500);
         DoubleBuffered = true;
 
         Controls.Add(BuildRootsPanel());
@@ -145,9 +146,9 @@ public sealed class StatusForm : Form
         _headline.Padding = new Padding(18, 12, 18, 0);
         _headline.Font = new Font("Segoe UI", 12F, FontStyle.Regular);
 
-        _pause.Dock = DockStyle.Top;
-        _pause.Height = 28;
+        _pause.Dock = DockStyle.Fill;
         _pause.FlatStyle = FlatStyle.System;
+        _pause.Margin = new Padding(4, 0, 0, 0);
         _pause.Click += (_, _) => TogglePause();
         _tips.SetToolTip(_pause,
             "Pause closes every folder note-vault watches. Windows will not rename or move a\n"
@@ -155,12 +156,31 @@ public sealed class StatusForm : Form
             + "Nothing is captured while paused. Resume rescans for moved repos and\n"
             + "catches up on every edit made in the meantime. Restarting the app resumes.");
 
-        var pauseHost = new Panel { Dock = DockStyle.Right, Width = 126, Padding = new Padding(0, 9, 16, 0) };
-        pauseHost.Controls.Add(_pause);
+        _forceRefresh.Dock = DockStyle.Fill;
+        _forceRefresh.FlatStyle = FlatStyle.System;
+        _forceRefresh.Margin = new Padding(0);
+        _forceRefresh.Text = "Force refresh";
+        _forceRefresh.Click += (_, _) => ForceRefresh();
+        _tips.SetToolTip(_forceRefresh,
+            "Don't wait for the schedule: re-runs 'git worktree list' now, reconciles every\n"
+            + "root's notes in full, and re-checks every tracked-file pattern immediately.");
+
+        var actionsHost = new TableLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            Width = 240,
+            Height = 28,
+            ColumnCount = 2,
+            Padding = new Padding(0, 9, 16, 0),
+        };
+        actionsHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55F));
+        actionsHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45F));
+        actionsHost.Controls.Add(_forceRefresh, 0, 0);
+        actionsHost.Controls.Add(_pause, 1, 0);
 
         var headlineRow = new Panel { Dock = DockStyle.Top, Height = 40 };
         headlineRow.Controls.Add(_headline);
-        headlineRow.Controls.Add(pauseHost);
+        headlineRow.Controls.Add(actionsHost);
 
         host.Controls.Add(_stats);
         host.Controls.Add(headlineRow);
@@ -212,7 +232,7 @@ public sealed class StatusForm : Form
     private Control BuildRootsPanel()
     {
         ConfigureList(_roots);
-        _roots.Columns.Add("repo / worktree", 430);
+        _roots.Columns.Add("repo / worktree / file", 430);
         _roots.Columns.Add("files", 70, HorizontalAlignment.Right);
         _roots.Columns.Add("last capture", 190);
         _roots.Columns.Add("state", 130);
@@ -282,6 +302,7 @@ public sealed class StatusForm : Form
 
         var buttonText = paused ? "Resume" : "Pause";
         if (_pause.Text != buttonText) _pause.Text = buttonText;
+        if (_forceRefresh.Enabled != !paused) _forceRefresh.Enabled = !paused;
 
         Set("VAULT", _state.VaultPath);
         Set("COMMITS", _state.CommitCount.ToString("N0"));
@@ -316,9 +337,14 @@ public sealed class StatusForm : Form
             .ThenBy(r => r.WorktreeName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (SameRows(_roots, ordered))
+        var tracked = BuildTrackedRows();
+
+        var keys = ordered.Select(r => r.Key).Concat(tracked.Select(t => t.Key)).ToList();
+        if (SameKeys(_roots, keys))
         {
-            for (var i = 0; i < ordered.Count; i++) ApplyRoot(_roots.Items[i], ordered[i]);
+            var i = 0;
+            foreach (var r in ordered) ApplyRoot(_roots.Items[i++], r);
+            foreach (var t in tracked) ApplyTrackedRow(_roots.Items[i++], t);
             return;
         }
 
@@ -328,6 +354,13 @@ public sealed class StatusForm : Form
             {
                 var item = new ListViewItem(new[] { r.Key, "", "", "" }) { Name = r.Key, Tag = r };
                 ApplyRoot(item, r);
+                _roots.Items.Add(item);
+            }
+
+            foreach (var t in tracked)
+            {
+                var item = new ListViewItem(new[] { "", "", "", "" }) { Name = t.Key };
+                ApplyTrackedRow(item, t);
                 _roots.Items.Add(item);
             }
         });
@@ -342,7 +375,7 @@ public sealed class StatusForm : Form
         var state = r.State switch
         {
             RootState.Watching => paused ? "paused" : "watching",
-            RootState.NoNotes => "no " + _cfg.NotesDirName,
+            RootState.NoNotes => "no " + r.NotesDirName,
             RootState.Retired => "retired",
             _ => "error",
         };
@@ -359,6 +392,52 @@ public sealed class StatusForm : Form
             RootState.Error => Red,
             _ => paused ? Dim : Ink,
         };
+        if (item.ForeColor != colour) item.ForeColor = colour;
+    }
+
+    /// <summary>
+    /// One row per (pattern, matched worktree) — a single declared pattern legitimately
+    /// matches several worktrees at once. A pattern with no current match still gets one
+    /// row, so "I added it but nothing shows up" is visible rather than silent.
+    /// </summary>
+    private List<(string Key, string Label, string Files, string LastCaptureText, string StateText, NoteRoot? Root)> BuildTrackedRows()
+    {
+        var rows = new List<(string, string, string, string, string, NoteRoot?)>();
+
+        foreach (var pattern in _state.TrackedFilePatterns.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+        {
+            var found = _state.TrackedFileMatches
+                .Where(m => string.Equals(m.RelPath, pattern, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(m => m.Root.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (found.Count == 0)
+            {
+                rows.Add(("tracked|" + pattern, pattern + "  (not found in any known worktree)",
+                    "—", "—", "not found", null));
+                continue;
+            }
+
+            foreach (var m in found)
+            {
+                rows.Add(("tracked|" + m.Root.Key + "|" + pattern, m.Root.Key + "/" + pattern.Replace('\\', '/'),
+                    "1", m.Root.LastCapture is null ? "—" : VaultPaths.Ago(m.Root.LastCapture), "tracked", m.Root));
+            }
+        }
+
+        return rows;
+    }
+
+    private void ApplyTrackedRow(ListViewItem item,
+        (string Key, string Label, string Files, string LastCaptureText, string StateText, NoteRoot? Root) row)
+    {
+        item.Tag = row.Root;
+        SetSub(item, 0, row.Label);
+        SetSub(item, 1, row.Files);
+        SetSub(item, 2, row.LastCaptureText);
+        SetSub(item, 3, row.StateText);
+
+        var colour = row.Root is null ? Dim : Ink;
         if (item.ForeColor != colour) item.ForeColor = colour;
     }
 
@@ -401,14 +480,6 @@ public sealed class StatusForm : Form
     {
         while (item.SubItems.Count <= index) item.SubItems.Add("");
         if (item.SubItems[index].Text != text) item.SubItems[index].Text = text;
-    }
-
-    private static bool SameRows(ListView lv, IReadOnlyList<NoteRoot> roots)
-    {
-        if (lv.Items.Count != roots.Count) return false;
-        for (var i = 0; i < roots.Count; i++)
-            if (!string.Equals(lv.Items[i].Name, roots[i].Key, StringComparison.Ordinal)) return false;
-        return true;
     }
 
     private static bool SameKeys(ListView lv, IReadOnlyList<string> keys)
@@ -459,6 +530,12 @@ public sealed class StatusForm : Form
     {
         if (_engine.Paused) _engine.Resume();
         else _engine.Pause();
+        Refresh_();
+    }
+
+    private void ForceRefresh()
+    {
+        _engine.ForceRefreshNow();
         Refresh_();
     }
 

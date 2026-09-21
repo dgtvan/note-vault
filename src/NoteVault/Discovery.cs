@@ -9,6 +9,8 @@ public sealed class RootRecord
     public string RepoPath { get; set; } = "";
     public string WorktreePath { get; set; } = "";
     public string WorktreeName { get; set; } = "";
+    public string NotesDirName { get; set; } = "";
+    public string KeySuffix { get; set; } = "";
     public string VaultRelPath { get; set; } = "";
     public string FirstSeenUtc { get; set; } = "";
     public string? LastCaptureUtc { get; set; }
@@ -64,9 +66,14 @@ public sealed class Discovery
 
             foreach (var wt in ParseWorktrees(res.StdOut))
             {
-                var root = BuildRoot(repo.Alias, repo.Path, wt);
-                roots.Add(root);
-                live.Add(root.Key);
+                // One root per configured notes-dir name, so several differently-named
+                // notes folders can be watched side by side in the same worktree.
+                foreach (var notesDirName in _cfg.EffectiveNotesDirNames)
+                {
+                    var root = BuildRoot(repo.Alias, repo.Path, wt, notesDirName);
+                    roots.Add(root);
+                    live.Add(root.Key);
+                }
             }
         }
 
@@ -75,7 +82,7 @@ public sealed class Discovery
             if (string.IsNullOrWhiteSpace(extra)) continue;
             var full = Path.GetFullPath(extra);
             var alias = Config.SanitizeSegment(new DirectoryInfo(full).Name);
-            var root = BuildRoot(alias, full, full, isExtra: true);
+            var root = BuildRoot(alias, full, full, "", isExtra: true);
             roots.Add(root);
             live.Add(root.Key);
         }
@@ -88,19 +95,24 @@ public sealed class Discovery
         return roots;
     }
 
-    private NoteRoot BuildRoot(string alias, string repoPath, string worktreePath, bool isExtra = false)
+    private NoteRoot BuildRoot(string alias, string repoPath, string worktreePath, string notesDirName, bool isExtra = false)
     {
         var wtName = Config.SanitizeSegment(
             new DirectoryInfo(worktreePath.TrimEnd('\\', '/')).Name);
 
         var notesPath = isExtra
             ? worktreePath
-            : Path.Combine(worktreePath, _cfg.NotesDirName);
+            : Path.Combine(worktreePath, notesDirName);
 
         var relPath = Path.Combine("vault", Config.SanitizeSegment(alias), wtName);
         var absPath = Path.Combine(_cfg.VaultDir, relPath);
 
-        var key = alias + "/" + wtName;
+        // Suffix only kicks in with more than one configured name, so the common
+        // single-name setup keeps the exact key (and roots.json identity) it always had.
+        var keySuffix = !isExtra && _cfg.EffectiveNotesDirNames.Count > 1
+            ? ":" + Config.SanitizeSegment(notesDirName)
+            : "";
+        var key = alias + "/" + wtName + keySuffix;
         _records.TryGetValue(key, out var rec);
 
         return new NoteRoot
@@ -109,9 +121,11 @@ public sealed class Discovery
             RepoPath = repoPath,
             WorktreePath = worktreePath,
             WorktreeName = wtName,
+            NotesDirName = isExtra ? "" : notesDirName,
             NotesPath = notesPath,
             VaultRelPath = relPath,
             VaultAbsPath = absPath,
+            KeySuffix = keySuffix,
             State = Directory.Exists(notesPath) ? RootState.Watching : RootState.NoNotes,
             FirstSeenUtc = rec is not null && DateTime.TryParse(rec.FirstSeenUtc, out var fs)
                 ? fs
@@ -130,7 +144,12 @@ public sealed class Discovery
     {
         foreach (var rec in _records.Values)
         {
-            if (live.Contains(rec.Alias + "/" + rec.WorktreeName)) continue;
+            var key = rec.Alias + "/" + rec.WorktreeName + rec.KeySuffix;
+            if (live.Contains(key)) continue;
+
+            var notesDirName = string.IsNullOrEmpty(rec.NotesDirName)
+                ? _cfg.EffectiveNotesDirNames[0]
+                : rec.NotesDirName;
 
             roots.Add(new NoteRoot
             {
@@ -138,9 +157,11 @@ public sealed class Discovery
                 RepoPath = rec.RepoPath,
                 WorktreePath = rec.WorktreePath,
                 WorktreeName = rec.WorktreeName,
-                NotesPath = Path.Combine(rec.WorktreePath, _cfg.NotesDirName),
+                NotesDirName = notesDirName,
+                NotesPath = Path.Combine(rec.WorktreePath, notesDirName),
                 VaultRelPath = rec.VaultRelPath,
                 VaultAbsPath = Path.Combine(_cfg.VaultDir, rec.VaultRelPath),
+                KeySuffix = rec.KeySuffix,
                 State = RootState.Retired,
                 FirstSeenUtc = DateTime.TryParse(rec.FirstSeenUtc, out var fs) ? fs : DateTime.UtcNow,
                 LastCapture = rec.LastCaptureUtc is not null && DateTime.TryParse(rec.LastCaptureUtc, out var lc)
@@ -172,7 +193,7 @@ public sealed class Discovery
             var list = JsonSerializer.Deserialize<List<RootRecord>>(json);
             if (list is null) return;
             foreach (var r in list)
-                _records[r.Alias + "/" + r.WorktreeName] = r;
+                _records[r.Alias + "/" + r.WorktreeName + r.KeySuffix] = r;
         }
         catch (Exception ex)
         {
@@ -192,6 +213,8 @@ public sealed class Discovery
                     RepoPath = r.RepoPath,
                     WorktreePath = r.WorktreePath,
                     WorktreeName = r.WorktreeName,
+                    NotesDirName = r.NotesDirName,
+                    KeySuffix = r.KeySuffix,
                     VaultRelPath = r.VaultRelPath,
                     FirstSeenUtc = r.FirstSeenUtc.ToString("o"),
                     LastCaptureUtc = r.LastCapture?.ToUniversalTime().ToString("o"),

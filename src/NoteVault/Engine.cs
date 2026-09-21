@@ -11,9 +11,11 @@ public sealed class Engine : IDisposable
     private readonly Committer _committer;
     private readonly Coalescer _coalescer;
     private readonly WatcherSet _watchers;
+    private readonly TrackedFileWatcherSet _trackedWatchers;
     private readonly RepoScanner _scanner;
     private readonly RepoFolderWatcher _repoFolders;
     private readonly CancellationTokenSource _cts = new();
+    private List<TrackedFileMatch> _lastTrackedMatches = new();
 
     private Task? _committerTask;
     private Task? _loopTask;
@@ -52,6 +54,7 @@ public sealed class Engine : IDisposable
         _committer = new Committer(cfg, state, _skip, _cts.Token);
         _coalescer = new Coalescer(cfg.DebounceMs, Dispatch);
         _watchers = new WatcherSet(_coalescer, state, _skip, OnWatcherOverflow);
+        _trackedWatchers = new TrackedFileWatcherSet(_coalescer, state);
         _scanner = new RepoScanner(cfg);
         _repoFolders = new RepoFolderWatcher(RequestRescan);
     }
@@ -70,6 +73,7 @@ public sealed class Engine : IDisposable
             if (_paused) return;
             _paused = true;
             _watchers.ReleaseAll();
+            _trackedWatchers.ReleaseAll();
             _repoFolders.ReleaseAll();
             _state.WatchedFolderCount = 0;
         }
@@ -103,6 +107,7 @@ public sealed class Engine : IDisposable
     {
         VaultSetup.EnsureVault(_cfg, _state.Errors);
         VaultSetup.EnsureGlobalGitignore(_cfg, _state.Errors);
+        _state.SetTrackedFilePatterns(TrackedFiles.Load(_cfg));
 
         _committerTask = Task.Run(() => _committer.RunAsync());
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -300,7 +305,55 @@ public sealed class Engine : IDisposable
             if (_paused) return;   // Pause released them mid-pass; leave them closed
             _watchers.Sync(roots);
             SyncFolderWatchers(roots);
+            SyncTrackedFiles(roots);
         }
+    }
+
+    /// <summary>
+    /// Re-resolves every tracked-file pattern against every live worktree, re-points the
+    /// per-folder watchers at whatever now matches, and captures anything that newly
+    /// appeared — a tracked file existing before note-vault knew about it (e.g. a fresh
+    /// worktree, or a pattern just added from the tray) must not wait for its own edit.
+    /// </summary>
+    private void SyncTrackedFiles(IReadOnlyList<NoteRoot> roots)
+    {
+        var matches = TrackedFiles.Resolve(roots, _state.TrackedFilePatterns);
+        _trackedWatchers.Sync(matches);
+        _state.SetTrackedFileMatches(matches);
+
+        var before = _lastTrackedMatches.Select(m => m.Root.Key + "|" + m.RelPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var m in matches)
+        {
+            if (before.Contains(m.Root.Key + "|" + m.RelPath)) continue;
+            Log.Info($"{m.Root.Key}: tracked file appeared — {m.RelPath}");
+            _committer.Post(new CaptureRequest
+            {
+                Root = m.Root,
+                Source = CaptureSource.Discover,
+                Paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { m.AbsPath },
+            });
+        }
+
+        _lastTrackedMatches = matches;
+    }
+
+    /// <summary>Called from the tray's "Tracked files…" dialog. Persists, then re-resolves.</summary>
+    public void UpdateTrackedFilePatterns(IEnumerable<string> patterns)
+    {
+        var normalized = patterns
+            .Select(p => TrackedFiles.TryNormalize(p, out var n, out _) ? n : null)
+            .Where(n => n is not null)
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        TrackedFiles.Save(_cfg, normalized);
+        _state.SetTrackedFilePatterns(normalized);
+        _committer.Post(new CaptureRequest { Kind = RequestKind.Metadata, Note = "tracked-files updated" });
+        RequestRescan();
     }
 
     /// <summary>
@@ -421,6 +474,20 @@ public sealed class Engine : IDisposable
         _state.LastReconcile = DateTime.Now;
     }
 
+    /// <summary>
+    /// The Status window's "Force refresh" button — the manual override for "don't wait
+    /// for the schedule". Runs the same full pass Resume() does: re-run `git worktree
+    /// list`, reconcile every root's notes, and re-resolve every tracked-file pattern —
+    /// rather than just ReconcileNow()'s narrower re-walk of already-known roots.
+    /// </summary>
+    public void ForceRefreshNow()
+    {
+        if (_paused) return;   // nothing to force while every watcher is released
+        Log.Info("Force refresh requested from Status window");
+        _catchUpAfterPause = true;
+        RequestRescan();
+    }
+
     private void OnWatcherOverflow(NoteRoot root)
     {
         if (!_cfg.Reconcile.OnWatcherError) return;
@@ -490,7 +557,7 @@ public sealed class Engine : IDisposable
         {
             if (!Directory.Exists(dir)) return 0;
             return Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
-                .Count(f => !Path.GetFileName(f).Equals(".note-vault-root", StringComparison.OrdinalIgnoreCase));
+                .Count(f => !VaultPaths.LegacyRootMarkerNames.Contains(Path.GetFileName(f), StringComparer.OrdinalIgnoreCase));
         }
         catch
         {

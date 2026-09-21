@@ -109,10 +109,9 @@ public sealed class Committer
     {
         var root = req.Root!;
         if (root.State == RootState.Retired) return;
-        if (!Directory.Exists(root.NotesPath)) return;
+        if (!Directory.Exists(root.NotesPath) && !HasAnyTrackedFile(root)) return;
 
         Directory.CreateDirectory(root.VaultAbsPath);
-        EnsureRootMarker(root);
 
         var sources = req.Paths is null
             ? EnumerateRoot(root)
@@ -123,9 +122,14 @@ public sealed class Committer
 
         foreach (var src in sources)
         {
-            if (!IsUnder(root.NotesPath, src)) continue;
+            // Same coordinate system for both: relative to the worktree root. That means
+            // a notes file lands at its real on-disk path (e.g. ".notes\foo.md") and a
+            // tracked file lands at its own real path (e.g. "src\api\.env") — the vault
+            // mirrors the worktree's actual layout, so nothing needs a special-cased
+            // destination or a namespace to avoid colliding with the other.
+            if (!IsUnder(root.NotesPath, src) && !IsTrackedFile(root, src)) continue;
 
-            var rel = VaultPaths.MangleRelative(VaultPaths.RelativeTo(root.NotesPath, src));
+            var rel = VaultPaths.MangleRelative(VaultPaths.RelativeTo(root.WorktreePath, src));
             var dst = Path.Combine(root.VaultAbsPath, rel);
 
             if (TryCopy(src, dst, out var error))
@@ -196,14 +200,12 @@ public sealed class Committer
     {
         var all = staged.Select(VaultPaths.ToGitPath).Distinct().ToList();
 
-        // The root marker is what gives a worktree a committed presence even when its
-        // notes folder is empty — git cannot track an empty directory. It has to be
-        // staged explicitly; it is written by us, not discovered under the notes folder.
-        all.Add(VaultPaths.ToGitPath(Path.Combine(root.VaultRelPath, ".note-vault-root")));
-
         // Bookkeeping rides along so retirement and alias assignments are versioned too.
+        // This is also where a worktree's identity lives now — vault/ holds nothing but
+        // real captured content, no per-folder marker file.
         all.Add("roots.json");
         all.Add("repos.json");   // absent when auto-scan is off, hence the filter below
+        all.Add("tracked-files.json");   // absent until a tracked file is ever added
 
         // git add fails the whole invocation on a missing pathspec, which would drop
         // a perfectly good capture. Only stage what is actually on disk.
@@ -233,7 +235,7 @@ public sealed class Committer
 
     private void CommitMetadata(string? note)
     {
-        var meta = new[] { "roots.json", "repos.json" }
+        var meta = new[] { "roots.json", "repos.json", "tracked-files.json" }
             .Where(f => File.Exists(Path.Combine(_cfg.VaultDir, f)))
             .ToArray();
         if (meta.Length == 0) return;
@@ -261,16 +263,38 @@ public sealed class Committer
         var results = new List<string>();
         try
         {
-            foreach (var f in Directory.EnumerateFiles(root.NotesPath, "*", SearchOption.AllDirectories))
+            if (Directory.Exists(root.NotesPath))
             {
-                if (_skip.ShouldSkip(f)) continue;
-                results.Add(f);
+                foreach (var f in Directory.EnumerateFiles(root.NotesPath, "*", SearchOption.AllDirectories))
+                {
+                    if (_skip.ShouldSkip(f)) continue;
+                    results.Add(f);
+                }
             }
         }
         catch (Exception ex)
         {
             Log.Error("Enumerate failed for " + root.NotesPath, ex);
         }
+
+        // A "whole root" capture (reconcile, or a newly discovered root) must sweep in
+        // tracked files too — they live outside the notes folder EnumerateRoot just walked.
+        foreach (var pattern in _state.TrackedFilePatterns)
+        {
+            string abs;
+            try
+            {
+                abs = Path.GetFullPath(Path.Combine(root.WorktreePath, pattern.Replace('/', Path.DirectorySeparatorChar)));
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (IsUnder(root.WorktreePath, abs) && File.Exists(abs) && !_skip.ShouldSkip(abs))
+                results.Add(abs);
+        }
+
         return results;
     }
 
@@ -318,29 +342,6 @@ public sealed class Committer
             }
         }
         return false;
-    }
-
-    private void EnsureRootMarker(NoteRoot root)
-    {
-        var marker = Path.Combine(root.VaultAbsPath, ".note-vault-root");
-        try
-        {
-            var payload = JsonSerializer.Serialize(new
-            {
-                alias = root.Alias,
-                repoPath = root.RepoPath,
-                worktreePath = root.WorktreePath,
-                notesPath = root.NotesPath,
-                firstSeenUtc = root.FirstSeenUtc.ToString("o"),
-            }, new JsonSerializerOptions { WriteIndented = true });
-
-            if (File.Exists(marker) && File.ReadAllText(marker) == payload) return;
-            File.WriteAllText(marker, payload, new UTF8Encoding(false));
-        }
-        catch (Exception ex)
-        {
-            Log.Error("Could not write root marker for " + root.Key, ex);
-        }
     }
 
     private static List<(char Status, string Path)> ParseNameStatus(string output, string rootRel)
@@ -393,7 +394,7 @@ public sealed class Committer
         {
             if (!Directory.Exists(dir)) return 0;
             return Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
-                .Count(f => !Path.GetFileName(f).Equals(".note-vault-root", StringComparison.OrdinalIgnoreCase));
+                .Count(f => !VaultPaths.LegacyRootMarkerNames.Contains(Path.GetFileName(f), StringComparer.OrdinalIgnoreCase));
         }
         catch
         {
@@ -406,5 +407,34 @@ public sealed class Committer
         var r = Path.GetFullPath(root).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
         var c = Path.GetFullPath(candidate);
         return c.StartsWith(r, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool HasAnyTrackedFile(NoteRoot root)
+    {
+        if (string.IsNullOrEmpty(root.WorktreePath)) return false;
+
+        foreach (var pattern in _state.TrackedFilePatterns)
+        {
+            try
+            {
+                var abs = Path.GetFullPath(Path.Combine(root.WorktreePath, pattern.Replace('/', Path.DirectorySeparatorChar)));
+                if (IsUnder(root.WorktreePath, abs) && File.Exists(abs)) return true;
+            }
+            catch { /* a malformed pattern just never matches */ }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True only if <paramref name="src"/> is under the worktree AND its relative path is
+    /// currently a declared tracked-file pattern — an event on some unrelated file under
+    /// the worktree root must never be captured just because it happens to pass by here.
+    /// </summary>
+    private bool IsTrackedFile(NoteRoot root, string src)
+    {
+        if (string.IsNullOrEmpty(root.WorktreePath) || !IsUnder(root.WorktreePath, src)) return false;
+
+        var rel = VaultPaths.RelativeTo(root.WorktreePath, src).Replace('\\', '/');
+        return _state.TrackedFilePatterns.Any(p => string.Equals(p, rel, StringComparison.OrdinalIgnoreCase));
     }
 }

@@ -266,3 +266,113 @@ public sealed class WatcherSet : IDisposable
 
     public void Dispose() => ReleaseAll();
 }
+
+/// <summary>
+/// One watcher per (worktree, containing folder) pair that holds a tracked file —
+/// never per-file, so several tracked files sharing a folder (e.g. "src/api/.env" and
+/// "src/api/.env.local") cost one watcher, not two. Filtering by filename happens in
+/// the callback rather than via FileSystemWatcher.Filter, which only accepts one glob.
+/// </summary>
+public sealed class TrackedFileWatcherSet : IDisposable
+{
+    private sealed class DirWatch
+    {
+        public FileSystemWatcher Watcher = null!;
+        public HashSet<string> FileNames = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private readonly Dictionary<string, DirWatch> _watchers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Coalescer _coalescer;
+    private readonly AppState _state;
+
+    public TrackedFileWatcherSet(Coalescer coalescer, AppState state)
+    {
+        _coalescer = coalescer;
+        _state = state;
+    }
+
+    public void Sync(IReadOnlyList<TrackedFileMatch> matches)
+    {
+        var want = new Dictionary<string, (NoteRoot Root, string Dir, HashSet<string> Names)>(
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var m in matches)
+        {
+            var dir = Path.GetDirectoryName(m.AbsPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+
+            var key = m.Root.Key + "|" + dir;
+            if (!want.TryGetValue(key, out var entry))
+                want[key] = entry = (m.Root, dir, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            entry.Names.Add(Path.GetFileName(m.AbsPath));
+        }
+
+        foreach (var key in _watchers.Keys.ToList())
+        {
+            if (want.ContainsKey(key)) continue;
+            try { _watchers[key].Watcher.Dispose(); } catch { }
+            _watchers.Remove(key);
+            _state.Errors.Clear(ErrKind.Watcher, "tracked:" + key);
+        }
+
+        foreach (var (key, w) in want)
+        {
+            if (_watchers.TryGetValue(key, out var existing))
+            {
+                existing.FileNames = w.Names;
+                continue;
+            }
+            Attach(key, w.Root, w.Dir, w.Names);
+        }
+    }
+
+    private void Attach(string key, NoteRoot root, string dir, HashSet<string> names)
+    {
+        try
+        {
+            var entry = new DirWatch { FileNames = names };
+
+            var w = new FileSystemWatcher(dir)
+            {
+                IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            };
+
+            void OnEvent(string? name, string fullPath)
+            {
+                if (name is null || !entry.FileNames.Contains(name)) return;
+                _coalescer.Touch(root, fullPath);
+            }
+
+            w.Created += (_, e) => OnEvent(e.Name, e.FullPath);
+            w.Changed += (_, e) => OnEvent(e.Name, e.FullPath);
+            w.Renamed += (_, e) => OnEvent(e.Name, e.FullPath);   // destination is what matters
+
+            w.Error += (_, e) =>
+                _state.Errors.Set(ErrKind.Watcher, "tracked:" + key,
+                    "tracked-file watcher error: " + e.GetException().Message);
+
+            w.EnableRaisingEvents = true;
+            entry.Watcher = w;
+            _watchers[key] = entry;
+            _state.Errors.Clear(ErrKind.Watcher, "tracked:" + key);
+        }
+        catch (Exception ex)
+        {
+            _state.Errors.Set(ErrKind.Watcher, "tracked:" + key,
+                "could not attach tracked-file watcher: " + ex.Message);
+        }
+    }
+
+    public void ReleaseAll()
+    {
+        foreach (var (key, entry) in _watchers)
+        {
+            try { entry.Watcher.EnableRaisingEvents = false; entry.Watcher.Dispose(); } catch { }
+            _state.Errors.Clear(ErrKind.Watcher, "tracked:" + key);
+        }
+        _watchers.Clear();
+    }
+
+    public void Dispose() => ReleaseAll();
+}

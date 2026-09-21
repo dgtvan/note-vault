@@ -54,6 +54,13 @@ public static class VaultPaths
     /// </summary>
     public const string MangledGit = "_nv_git_";
 
+    /// <summary>
+    /// No longer written — worktree identity lives in roots.json at the vault root instead,
+    /// so vault/ holds nothing but real captured content. Kept only so a file count doesn't
+    /// include one left behind in a worktree folder captured by an older version of the app.
+    /// </summary>
+    public static readonly string[] LegacyRootMarkerNames = { ".note-vault-root", ".note-vault-root.json" };
+
     public static string MangleRelative(string relativePath)
     {
         var parts = relativePath.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
